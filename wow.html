@@ -1,0 +1,787 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Three.js Building Analysis with BIPV and Rooftop Solar</title>
+    <style>
+      body {
+        margin: 0;
+        overflow: hidden;
+      }
+      canvas {
+        display: block;
+      }
+      .controls {
+        position: absolute;
+        top: 10px;
+        left: 10px;
+        z-index: 100;
+        background: rgba(255, 255, 255, 0.7);
+        padding: 10px;
+      }
+      .info-panel {
+        position: absolute;
+        top: 10px;
+        right: 10px;
+        background-color: rgba(255, 255, 255, 0.8);
+        padding: 10px;
+        border: 1px solid #ccc;
+        z-index: 100;
+        max-height: 80vh;
+        overflow-y: auto;
+      }
+      .light-bar {
+        height: 20px;
+        margin: 5px 0;
+        border-radius: 3px;
+      }
+      .fully-lit {
+        background-color: #4caf50;
+      }
+      .partially-lit {
+        background-color: #ffc107;
+      }
+      .shadowed {
+        background-color: #607d8b;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="controls">
+      <input type="datetime-local" id="timeInput" />
+      <input
+        type="number"
+        id="latInput"
+        placeholder="Latitude"
+        step="0.0001"
+        style="width: 100px"
+      />
+      <input
+        type="number"
+        id="longInput"
+        placeholder="Longitude"
+        step="0.0001"
+        style="width: 100px"
+      />
+      <input
+        type="number"
+        id="ghiInput"
+        placeholder="GHI (kWh/m²/day)"
+        step="0.01"
+        style="width: 150px"
+      />
+      <button onclick="updateFromInputs()">Update Sun Position</button>
+      <button onclick="startSimulation()">Start Day Simulation</button>
+    </div>
+    <div id="infoPanel" class="info-panel"></div>
+
+    <script src="https://cdn.jsdelivr.net/npm/three@0.132.2/build/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.132.2/examples/js/controls/OrbitControls.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.132.2/examples/js/loaders/OBJLoader.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/suncalc/1.9.0/suncalc.min.js"></script>
+    <script>
+      // Constants
+      const AHMEDABAD_LAT = 23.0225;
+      const AHMEDABAD_LONG = 72.5714;
+      const DEFAULT_GHI = 5.5; // Default GHI value for Ahmedabad
+
+      // Scene setup
+      const scene = new THREE.Scene();
+      const camera = new THREE.PerspectiveCamera(
+        75,
+        window.innerWidth / window.innerHeight,
+        0.1,
+        1000
+      );
+      camera.position.set(100, 100, 100);
+      camera.lookAt(0, 0, 0);
+
+      const renderer = new THREE.WebGLRenderer({ antialias: true });
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      renderer.shadowMap.enabled = true;
+      renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+      document.body.appendChild(renderer.domElement);
+
+      const controls = new THREE.OrbitControls(camera, renderer.domElement);
+      controls.enableDamping = true;
+      controls.dampingFactor = 0.05;
+      controls.maxDistance = 500;
+      controls.minDistance = 10;
+
+      // Lighting
+      const ambientLight = new THREE.AmbientLight(0x404040, 0.5);
+      scene.add(ambientLight);
+
+      const sunLight = new THREE.DirectionalLight(0xffffff, 1.2);
+      sunLight.castShadow = true;
+      sunLight.shadow.mapSize.width = 4096;
+      sunLight.shadow.mapSize.height = 4096;
+      sunLight.shadow.camera.near = 1;
+      sunLight.shadow.camera.far = 500;
+      sunLight.shadow.camera.left = -200;
+      sunLight.shadow.camera.right = 200;
+      sunLight.shadow.camera.top = 200;
+      sunLight.shadow.camera.bottom = -200;
+      sunLight.shadow.bias = -0.0005;
+      scene.add(sunLight);
+
+      const sunGeometry = new THREE.SphereGeometry(0, 32, 32);
+      const sunMaterial = new THREE.MeshBasicMaterial({
+        color: 0xffff00,
+        emissive: 0xffff00,
+        emissiveIntensity: 1,
+      });
+      const sunMesh = new THREE.Mesh(sunGeometry, sunMaterial);
+      scene.add(sunMesh);
+
+      // Sky dome
+      const skyGeometry = new THREE.SphereGeometry(500, 32, 32);
+      const skyMaterial = new THREE.ShaderMaterial({
+        uniforms: {
+          topColor: { value: new THREE.Color(0x0077ff) },
+          bottomColor: { value: new THREE.Color(0xffffff) },
+          offset: { value: 400 },
+          exponent: { value: 0.6 },
+          sunPosition: { value: new THREE.Vector3() },
+        },
+        vertexShader: `
+        varying vec3 vWorldPosition;
+        void main() {
+          vec4 worldPosition = modelMatrix * vec4(position, 1.0);
+          vWorldPosition = worldPosition.xyz;
+          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+        }
+      `,
+        fragmentShader: `
+        uniform vec3 topColor;
+        uniform vec3 bottomColor;
+        uniform float offset;
+        uniform float exponent;
+        uniform vec3 sunPosition;
+        varying vec3 vWorldPosition;
+        void main() {
+          float h = normalize(vWorldPosition + offset).y;
+          float sunFactor = max(dot(normalize(vWorldPosition), normalize(sunPosition)), 0.0);
+          vec3 skyColor = mix(bottomColor, topColor, pow(max(h, 0.0), exponent));
+          if(sunFactor > 0.98) {
+            skyColor = mix(skyColor, vec3(1.0, 0.8, 0.4), 0.6);
+          }
+          gl_FragColor = vec4(skyColor, 1.0);
+        }
+      `,
+        side: THREE.BackSide,
+        depthWrite: false,
+      });
+      const skyDome = new THREE.Mesh(skyGeometry, skyMaterial);
+      scene.add(skyDome);
+
+      // Ground
+      const groundGeometry = new THREE.PlaneGeometry(2000, 2000);
+      const groundMaterial = new THREE.MeshStandardMaterial({
+        color: 0x555555,
+        roughness: 0.8,
+        metalness: 0.2,
+        side: THREE.DoubleSide,
+      });
+      const ground = new THREE.Mesh(groundGeometry, groundMaterial);
+      ground.rotation.x = -Math.PI / 2;
+      ground.position.y = 0;
+      ground.receiveShadow = true;
+      scene.add(ground);
+
+      // Variables
+      let selectedObject = null;
+      const originalMaterials = new Map();
+      const objects = new Map();
+
+      // Highlight material
+      const highlightMaterial = new THREE.MeshStandardMaterial({
+        color: 0x00ff00,
+        transparent: true,
+        opacity: 0.3,
+        side: THREE.DoubleSide,
+      });
+
+      // Add at top with other globals
+      let isSimulating = false;
+      let simulationObject = null;
+
+      // Add after your variable declarations
+      let raycaster = new THREE.Raycaster();
+      let mouse = new THREE.Vector2();
+
+      // Functions
+      function updateSunPosition(latitude, longitude, datetime) {
+        const sunPos = SunCalc.getPosition(datetime, latitude, longitude);
+        const distance = 100;
+
+        const phi = Math.PI / 2 - sunPos.altitude;
+        const theta = sunPos.azimuth;
+
+        const x = distance * Math.sin(phi) * Math.cos(theta);
+        const y = distance * Math.cos(phi);
+        const z = distance * Math.sin(phi) * Math.sin(theta);
+
+        sunLight.position.set(x, y, z);
+        sunMesh.position.set(x, y, z);
+
+        // Update sky shader sun position
+        skyMaterial.uniforms.sunPosition.value.copy(sunLight.position);
+      }
+
+      function updateFromInputs() {
+        const datetime = new Date(document.getElementById("timeInput").value);
+        const lat =
+          parseFloat(document.getElementById("latInput").value) ||
+          AHMEDABAD_LAT;
+        const long =
+          parseFloat(document.getElementById("longInput").value) ||
+          AHMEDABAD_LONG;
+
+        updateSunPosition(lat, long, datetime);
+      }
+
+      function analyzeObject(object) {
+        if (!object || !object.isMesh) {
+          console.warn("No valid object selected for analysis");
+          return;
+        }
+
+        const renderTarget = new THREE.WebGLRenderTarget(
+          window.innerWidth,
+          window.innerHeight,
+          { minFilter: THREE.NearestFilter, magFilter: THREE.NearestFilter }
+        );
+
+        const analysisMaterial = new THREE.ShaderMaterial({
+          uniforms: {
+            lightDirection: { value: sunLight.position.clone().normalize() },
+          },
+          vertexShader: `
+          varying vec3 vNormal;
+          void main() {
+            vNormal = normalMatrix * normal;
+            gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+          }
+        `,
+          fragmentShader: `
+          uniform vec3 lightDirection;
+          varying vec3 vNormal;
+          void main() {
+            vec3 N = normalize(vNormal);
+            vec3 L = normalize(-lightDirection);
+            float intensity = max(dot(N, L), 0.0);
+            gl_FragColor = vec4(vec3(intensity), 1.0);
+          }
+        `,
+        });
+
+        const originalMaterial = object.material;
+        object.material = analysisMaterial;
+
+        renderer.setRenderTarget(renderTarget);
+        renderer.render(scene, camera);
+        renderer.setRenderTarget(null);
+
+        const pixelBuffer = new Uint8Array(
+          window.innerWidth * window.innerHeight * 4
+        );
+        renderer.readRenderTargetPixels(
+          renderTarget,
+          0,
+          0,
+          window.innerWidth,
+          window.innerHeight,
+          pixelBuffer
+        );
+
+        object.material = originalMaterial;
+        renderTarget.dispose();
+
+        let fullyLit = 0,
+          partiallyLit = 0,
+          shadowed = 0,
+          totalValidPixels = 0;
+
+        for (let i = 0; i < pixelBuffer.length; i += 4) {
+          if (pixelBuffer[i + 3] > 0) {
+            totalValidPixels++;
+            const intensity = pixelBuffer[i] / 255;
+            if (intensity > 0.6) fullyLit++;
+            else if (intensity > 0.3) partiallyLit++;
+            else shadowed++;
+          }
+        }
+
+        const fullyLitPercent = ((fullyLit / totalValidPixels) * 100).toFixed(
+          1
+        );
+        const partiallyLitPercent = (
+          (partiallyLit / totalValidPixels) *
+          100
+        ).toFixed(1);
+        const shadowedPercent = ((shadowed / totalValidPixels) * 100).toFixed(
+          1
+        );
+
+        // Calculate total surface area
+        const geometry = object.geometry;
+        let totalArea = 0;
+        let roofArea = 0;
+
+        if (geometry.index !== null) {
+          const position = geometry.attributes.position;
+          const index = geometry.index;
+          const triangleCount = index.count / 3;
+
+          for (let i = 0; i < triangleCount; i++) {
+            const i3 = i * 3;
+            const a = new THREE.Vector3().fromBufferAttribute(
+              position,
+              index.getX(i3)
+            );
+            const b = new THREE.Vector3().fromBufferAttribute(
+              position,
+              index.getX(i3 + 1)
+            );
+            const c = new THREE.Vector3().fromBufferAttribute(
+              position,
+              index.getX(i3 + 2)
+            );
+            const area = calculateTriangleArea(a, b, c);
+            totalArea += area;
+
+            // Assuming roof faces have normals pointing upwards
+            const normal = calculateTriangleNormal(a, b, c);
+            if (normal.y > 0.7) {
+              // Consider faces with normals pointing up (angle < 45 degrees) as roof
+              roofArea += area;
+            }
+          }
+        } else {
+          const position = geometry.attributes.position;
+          const triangleCount = position.count / 3;
+
+          for (let i = 0; i < triangleCount; i++) {
+            const i3 = i * 3;
+            const a = new THREE.Vector3().fromBufferAttribute(position, i3);
+            const b = new THREE.Vector3().fromBufferAttribute(position, i3 + 1);
+            const c = new THREE.Vector3().fromBufferAttribute(position, i3 + 2);
+            const area = calculateTriangleArea(a, b, c);
+            totalArea += area;
+
+            // Assuming roof faces have normals pointing upwards
+            const normal = calculateTriangleNormal(a, b, c);
+            if (normal.y > 0.7) {
+              // Consider faces with normals pointing up (angle < 45 degrees) as roof
+              roofArea += area;
+            }
+          }
+        }
+
+        // Calculate areas based on lighting conditions
+        const fullyLitArea = (fullyLitPercent / 100) * totalArea;
+        const partiallyLitArea = (partiallyLitPercent / 100) * totalArea;
+        const shadowedArea = (shadowedPercent / 100) * totalArea;
+
+        // Calculate BIPV and Rooftop solar potential
+        const ghi =
+          parseFloat(document.getElementById("ghiInput").value) || DEFAULT_GHI;
+        const pvEfficiency = 0.2; // Assume 20% efficiency for PV panels
+        const performanceRatio = 0.75; // Typical value for rooftop systems
+
+        const bipvPotential =
+          fullyLitArea * ghi * pvEfficiency * performanceRatio; // kWh/day
+        const rooftopPotential =
+          roofArea * ghi * pvEfficiency * performanceRatio; // kWh/day
+
+        return {
+          name: object.name || `Unnamed (${object.id})`,
+          vertices: object.geometry.attributes.position.count,
+          position: object.position,
+          fullyLit,
+          partiallyLit,
+          shadowed,
+          fullyLitPercent,
+          partiallyLitPercent,
+          shadowedPercent,
+          totalArea,
+          roofArea,
+          fullyLitArea,
+          partiallyLitArea,
+          shadowedArea,
+          bipvPotential,
+          rooftopPotential,
+        };
+      }
+
+      function calculateTriangleArea(a, b, c) {
+        const ab = new THREE.Vector3().subVectors(b, a);
+        const ac = new THREE.Vector3().subVectors(c, a);
+        const cross = new THREE.Vector3().crossVectors(ab, ac);
+        return 0.5 * cross.length();
+      }
+
+      function calculateTriangleNormal(a, b, c) {
+        const ab = new THREE.Vector3().subVectors(b, a);
+        const ac = new THREE.Vector3().subVectors(c, a);
+        return new THREE.Vector3().crossVectors(ab, ac).normalize();
+      }
+
+      function displayObjectInfo(info) {
+        const infoPanel = document.getElementById("infoPanel");
+        infoPanel.innerHTML = `
+        <strong>Building Information</strong><br>
+        Name: ${info.name}<br>
+        Vertices: ${info.vertices}<br>
+        Position: (${info.position.x.toFixed(2)}, ${info.position.y.toFixed(
+          2
+        )}, ${info.position.z.toFixed(2)})<br>
+        <br>
+        <strong>Light Analysis</strong><br>
+        Fully Lit (>60%): ${
+          info.fullyLitPercent
+        }% (${info.fullyLit.toLocaleString()} pixels)<br>
+        Partially Lit (30-60%): ${
+          info.partiallyLitPercent
+        }% (${info.partiallyLit.toLocaleString()} pixels)<br>
+        Shadowed (<30%): ${
+          info.shadowedPercent
+        }% (${info.shadowed.toLocaleString()} pixels)<br>
+        <br>
+        <strong>Area Analysis</strong><br>
+        Total Surface Area: ${info.totalArea.toFixed(2)} square meters<br>
+        Roof Area: ${info.roofArea.toFixed(2)} square meters<br>
+        Fully Lit Area: ${info.fullyLitArea.toFixed(2)} square meters<br>
+        Partially Lit Area: ${info.partiallyLitArea.toFixed(
+          2
+        )} square meters<br>
+        Shadowed Area: ${info.shadowedArea.toFixed(2)} square meters<br>
+        <br>
+        <strong>Solar Potential</strong><br>
+        Verticle Surface Potential: ${info.bipvPotential.toFixed(2)} kWh/day<br>
+        Rooftop Solar Potential: ${info.rooftopPotential.toFixed(2)} kWh/day<br>
+        Total Solar Potential: ${(
+          info.bipvPotential + info.rooftopPotential
+        ).toFixed(2)} kWh/day
+      `;
+      }
+
+      async function simulateDay(latitude, longitude, date) {
+        if (!selectedObject || !selectedObject.isMesh) {
+          console.warn("Please select a valid building first");
+          return;
+        }
+
+        // Store simulation state
+        isSimulating = true;
+        simulationObject = selectedObject;
+        const originalMaterial = simulationObject.material.clone();
+
+        try {
+          const startHour = 6;
+          const endHour = 18;
+          const timeStep = 1;
+          const results = [];
+
+          for (let hour = startHour; hour <= endHour; hour += timeStep) {
+            // Use simulationObject instead of selectedObject
+            if (!simulationObject || !simulationObject.isMesh) {
+              throw new Error("Lost reference to simulation object");
+            }
+
+            const datetime = new Date(date);
+            datetime.setHours(hour);
+            updateSunPosition(latitude, longitude, datetime);
+
+            const hourResult = analyzeObject(simulationObject);
+            if (hourResult) {
+              results.push(hourResult);
+            }
+
+            await new Promise((resolve) => setTimeout(resolve, 500));
+          }
+
+          // Process results using simulationObject
+          if (results.length > 0) {
+            // Your existing results processing code...
+          }
+        } catch (error) {
+          console.error("Simulation failed:", error);
+        } finally {
+          // Cleanup
+          if (simulationObject && simulationObject.isMesh) {
+            simulationObject.material = originalMaterial;
+          }
+          isSimulating = false;
+          simulationObject = null;
+        }
+      }
+
+      function calculateMeshLighting(mesh) {
+        // Use a simple approximation based on mesh normals and sun direction
+        const sunDir = sunLight.position.clone().normalize();
+        const normalMatrix = new THREE.Matrix3().getNormalMatrix(
+          mesh.matrixWorld
+        );
+
+        let totalIntensity = 0;
+        const normals = mesh.geometry.attributes.normal;
+        for (let i = 0; i < normals.count; i++) {
+          const normal = new THREE.Vector3(
+            normals.getX(i),
+            normals.getY(i),
+            normals.getZ(i)
+          );
+          normal.applyMatrix3(normalMatrix).normalize();
+          const intensity = Math.max(normal.dot(sunDir), 0);
+          totalIntensity += intensity;
+        }
+
+        // Return average intensity
+        return totalIntensity / normals.count;
+      }
+
+      function applyHeatmap(meshLightingData) {
+        // Determine min and max intensities
+        let minIntensity = Infinity;
+        let maxIntensity = -Infinity;
+        meshLightingData.forEach((intensity) => {
+          if (intensity < minIntensity) minIntensity = intensity;
+          if (intensity > maxIntensity) maxIntensity = intensity;
+        });
+
+        // Apply color to each mesh based on accumulated intensity
+        meshLightingData.forEach((intensity, mesh) => {
+          // Normalize intensity
+          const normalizedIntensity =
+            (intensity - minIntensity) / (maxIntensity - minIntensity);
+
+          // Map normalized intensity to color from blue (low) to red (high)
+          const hue = ((1 - normalizedIntensity) * 240) / 360; // Map intensity from blue (240°) to red (0°)
+          const color = new THREE.Color().setHSL(hue, 1, 0.5);
+
+          // Apply color to mesh
+          mesh.material = new THREE.MeshBasicMaterial({ color: color });
+        });
+      }
+
+      function startSimulation() {
+        const latitude =
+          parseFloat(document.getElementById("latInput").value) ||
+          AHMEDABAD_LAT;
+        const longitude =
+          parseFloat(document.getElementById("longInput").value) ||
+          AHMEDABAD_LONG;
+        const dateInput = document.getElementById("timeInput").value;
+        const date = new Date(dateInput);
+
+        simulateDay(latitude, longitude, date);
+      }
+
+      // Event listeners
+      raycaster = new THREE.Raycaster();
+      mouse = new THREE.Vector2();
+
+      function onMouseMove(event) {
+        event.preventDefault();
+        mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
+        mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
+
+        raycaster.setFromCamera(mouse, camera);
+        const intersects = raycaster.intersectObjects(
+          [...objects.values()],
+          true
+        );
+
+        document.body.style.cursor =
+          intersects.length > 0 ? "pointer" : "default";
+      }
+
+      function onClick(event) {
+        if (isSimulating) {
+          console.log("Simulation in progress - selection locked");
+          return;
+        }
+
+        event.preventDefault();
+        mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
+        mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
+
+        raycaster.setFromCamera(mouse, camera);
+        const intersects = raycaster.intersectObjects(
+          [...objects.values()],
+          true
+        );
+
+        // Only reset if not simulating
+        if (selectedObject && !isSimulating) {
+          const originalMaterial = originalMaterials.get(selectedObject);
+          if (originalMaterial) {
+            selectedObject.material = originalMaterial;
+          }
+          selectedObject = null;
+        }
+
+        if (intersects.length > 0) {
+          const mesh = intersects[0].object;
+          if (mesh.isMesh) {
+            selectedObject = mesh;
+            if (!originalMaterials.has(selectedObject)) {
+              originalMaterials.set(
+                selectedObject,
+                selectedObject.material.clone()
+              );
+            }
+            selectedObject.material = highlightMaterial;
+            const info = analyzeObject(selectedObject);
+            if (info) {
+              displayObjectInfo(info);
+            }
+          }
+        }
+      }
+
+      window.addEventListener("click", onClick);
+
+      window.addEventListener("resize", () => {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+      });
+
+      // Load model
+      const objLoader = new THREE.OBJLoader();
+      objLoader.load(
+        "ahm3d_obj.obj",
+        (object) => {
+          let objectCount = 0;
+          object.traverse((child) => {
+            if (child.isMesh) {
+              child.geometry.computeVertexNormals();
+              child.castShadow = true;
+              child.receiveShadow = true;
+              child.name = child.name || `Object_${objectCount++}`;
+
+              // Ensure the object is positioned correctly relative to the ground
+              const boundingBox = new THREE.Box3().setFromObject(child);
+              const objectHeight = boundingBox.max.y - boundingBox.min.y;
+              child.position.y = objectHeight / 1000; // Position the object so its base is at y=0
+
+              objects.set(child.name, child);
+              originalMaterials.set(child, child.material.clone());
+            }
+          });
+          scene.add(object);
+          console.log(`Total objects loaded: ${objects.size}`);
+        },
+        undefined,
+        (error) => {
+          console.error('An error happened', error);
+        }
+      );
+
+      const now = new Date();
+      document.getElementById("timeInput").value = now
+        .toISOString()
+        .slice(0, 16);
+      document.getElementById("latInput").value = AHMEDABAD_LAT;
+      document.getElementById("longInput").value = AHMEDABAD_LONG;
+      document.getElementById("ghiInput").value = DEFAULT_GHI;
+
+      // Initial sun position update
+      updateSunPosition(AHMEDABAD_LAT, AHMEDABAD_LONG, now);
+
+      // Animation loop
+      function animate() {
+        requestAnimationFrame(animate);
+        controls.update();
+        skyDome.position.copy(camera.position);
+        renderer.render(scene, camera);
+      }
+
+      // Function to calculate average pixel color
+      function calculateAveragePixelColor() {
+        // Create a temporary 2D canvas
+        const tempCanvas = document.createElement('canvas');
+        tempCanvas.width = renderer.domElement.width;
+        tempCanvas.height = renderer.domElement.height;
+        const context = tempCanvas.getContext('2d');
+
+        // Draw WebGL canvas content to the temporary canvas
+        context.drawImage(renderer.domElement, 0, 0);
+
+        try {
+            const imageData = context.getImageData(0, 0, tempCanvas.width, tempCanvas.height);
+            const data = imageData.data;
+            let r = 0, g = 0, b = 0;
+            let pixelCount = 0;
+
+            for (let i = 0; i < data.length; i += 4) {
+                if (data[i + 3] > 0) { // Only count non-transparent pixels
+                    r += data[i];
+                    g += data[i + 1];
+                    b += data[i + 2];
+                    pixelCount++;
+                }
+            }
+
+            if (pixelCount > 0) {
+                r = Math.floor(r / pixelCount);
+                g = Math.floor(g / pixelCount);
+                b = Math.floor(b / pixelCount);
+            }
+
+            return { r, g, b };
+        } catch (error) {
+            console.error('Error calculating average color:', error);
+            return { r: 0, g: 0, b: 0 };
+        } finally {
+            // Clean up
+            tempCanvas.remove();
+        }
+      }
+
+      // Function to display average pixel color and other info
+      function displaySimulationInfo() {
+        try {
+            const avgColor = calculateAveragePixelColor();
+            const infoPanel = document.getElementById('infoPanel');
+            const now = new Date();
+            
+            const info = `
+                <strong>Simulation Information</strong><br>
+                Average Scene Color: RGB(${avgColor.r}, ${avgColor.g}, ${avgColor.b})<br>
+                Latitude: ${AHMEDABAD_LAT}°<br>
+                Longitude: ${AHMEDABAD_LONG}°<br>
+                GHI: ${DEFAULT_GHI} kWh/m²/day<br>
+                Time: ${now.toLocaleString()}<br>
+            `;
+            
+            if (infoPanel) {
+                infoPanel.innerHTML += info;
+            }
+        } catch (error) {
+            console.error('Error displaying simulation info:', error);
+        }
+      }
+
+      // Call displaySimulationInfo after the scene has been rendered
+      function updateSimulationInfo() {
+        // Wait for next frame to ensure scene is rendered
+        requestAnimationFrame(() => {
+            displaySimulationInfo();
+        });
+      }
+
+      // Start animation and trigger initial simulation info display
+      animate();
+      updateSimulationInfo();
+
+      // Add event listeners
+      window.addEventListener("mousemove", onMouseMove);
+      window.addEventListener("click", onClick);
+    </script>
+  </body>
+</html>
