@@ -311,6 +311,7 @@ canvas#solarChart {
   <script src="https://cdn.jsdelivr.net/npm/three@0.132.2/examples/js/utils/BufferGeometryUtils.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
   <script>
+    const GHI_VALS = [3.5, 3.6, 3.7, 3.8, 4.4, 5.0, 5.5, 5.0, 4.4, 3.8, 3.2, 2.0];
     let globalAddArray = null;
     // Constants
     const AHMEDABAD_LAT = 23.0225;
@@ -488,7 +489,7 @@ canvas#solarChart {
       updateSunPosition(lat, long, datetime);
     }
 
-    function analyzeObject(object) {
+    function analyzeObject(object,ghi_index) {
       if (!object?.isMesh) return null;
 
       const geometry = object.geometry;
@@ -563,7 +564,7 @@ canvas#solarChart {
       }
 
       const ghi =
-        parseFloat(document.getElementById("ghiInput").value) || DEFAULT_GHI;
+        GHI_VALS[ghi_index] || DEFAULT_GHI;
       const pvEfficiency = 0.2;
       const performanceRatio = 0.75;
 
@@ -764,7 +765,7 @@ canvas#solarChart {
           datetime.setHours(hour);
           updateSunPosition(latitude, longitude, datetime);
 
-          const hourResult = analyzeObject(simulationObject);
+          const hourResult = analyzeObject(simulationObject,hour-6);
           if (hourResult) {
             results.push(hourResult);
             // Add current intensities to global array
@@ -1003,7 +1004,7 @@ canvas#solarChart {
             );
           }
           selectedObject.material = highlightMaterial;
-          const info = analyzeObject(selectedObject);
+          const info = analyzeObject(selectedObject,4);
           if (info) {
             displayObjectInfo(info);
           }
