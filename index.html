@@ -134,6 +134,22 @@
       background-color: var(--shadow-color);
     }
 
+    .facadeChart {
+    position: absolute;
+    background: var(--panel-bg);
+    padding: 20px;
+    border-radius: 8px;
+    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+    width: 600px;
+    z-index: 1000;
+}
+
+canvas#facadeBIPVchart {
+    width: 100% !important;
+    height: 300px !important;
+    margin: 0;
+}
+
     /* Scrollbar styling */
     ::-webkit-scrollbar {
       width: 8px;
@@ -229,7 +245,7 @@
       color: var(--text-color);
     }
 
-    .faccadeChart{
+    .facadeChart{
       background: var(--panel-bg);
       padding: 20px;
       border-radius: 8px;
@@ -311,7 +327,8 @@ canvas#solarChart {
       Start Day Simulation
     </button> 
   </div>
-  <div id="infoPanel" class="info-panel"></div>
+  <div id="infoPanel" class="info-panel"><button onclick="printInfoPanel()">Print</button>
+</div>
   
   <script src="https://cdn.jsdelivr.net/npm/three@0.132.2/build/three.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/three@0.132.2/examples/js/controls/OrbitControls.js"></script>
@@ -320,6 +337,18 @@ canvas#solarChart {
   <script src="https://cdn.jsdelivr.net/npm/three@0.132.2/examples/js/utils/BufferGeometryUtils.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
   <script>
+    function printInfoPanel() {
+    var content = document.getElementById('infoPanel').innerHTML;
+    var originalContent = document.body.innerHTML;
+
+    document.body.innerHTML = content;
+    window.print();
+
+    // Restore original content after printing
+    document.body.innerHTML = originalContent;
+    window.location.reload();  // Optional: Reload the page to restore DOM state
+}
+
     const GHI_VALS = [3.5, 3.6, 3.7, 3.8, 4.4, 5.0, 5.5, 5.0, 4.4, 3.8, 3.2, 2.0];
     let globalAddArray = null;
     // Constants
@@ -705,6 +734,7 @@ canvas#solarChart {
       const position = info.position || { x: 0, y: 0, z: 0 };
 
       infoPanel.innerHTML = `
+      <button onclick="printInfoPanel()">Print</button>
           <div class="info-section">
             <h3>Area Analysis (Current Time)</h3>
             <div class="info-row">
@@ -1368,7 +1398,7 @@ function applyHeatmapToObject(object, intensities) {
       // Update legend
       const legendHTML = `
             <div class="heatmap-legend">
-                <div class="legend-title">Solar Irradiance</div>
+                <div class="legend-title">Solar Irradiation</div>
                 <div class="heatmap-gradient" style="background: linear-gradient(
                     to right,
                     #313695,
@@ -1722,23 +1752,21 @@ function applyHeatmapToObject(object, intensities) {
     }
 
   function displayNorthSouthwalaGraph(results) {
-  // Remove existing chart if any
-  const existingChart = document.querySelector(".faccadeChart");
+  const existingChart = document.querySelector(".facadeChart");
   if (existingChart) {
     existingChart.remove();
   }
 
-  // Create chart container
   const chartContainer = document.createElement("div");
-  chartContainer.className = "faccadeChart";
-  chartContainer.style.width = "600px";
-  chartContainer.style.height = "300px";
+  chartContainer.className = "facadeChart";
   chartContainer.innerHTML = `
     <div class="chart-title">Facade-based BIPV Generation</div>
     <canvas id="facadeBIPVchart"></canvas>
   `;
   var infoPanel = document.getElementById("infoPanel");
   infoPanel.appendChild(chartContainer);
+  const br = document.createElement("br"); // Add line break
+  infoPanel.appendChild(br);
 
   // Prepare data
   const times = results.map((_, index) => index + 6);
@@ -1831,26 +1859,7 @@ function applyHeatmapToObject(object, intensities) {
 
 
 
-    // Add CSS for new chart
-    const style = document.createElement("style");
-    style.textContent = `
-.solar-chart-container {
-    position: absolute;
-    background: var(--panel-bg);
-    padding: 20px;
-    border-radius: 8px;
-    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
-    width: 600px;
-    z-index: 1000;
-}
-
-canvas#solarChart {
-    width: 100% !important;
-    height: 300px !important;
-    margin: 0;
-}
-`;
-    document.head.appendChild(style);
+  
   </script>
 </body>
 
